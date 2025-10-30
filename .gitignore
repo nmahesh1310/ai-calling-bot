@@ -1,0 +1,19 @@
+# Ignore sensitive files
+.env
+ai-pl-calling.json
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Audio & logs
+audio/
+*.wav
+*.log
+call_log.txt
+speech_log.txt
+
+# VS Code & environment
+.vscode/
+.env/
+.venv/
