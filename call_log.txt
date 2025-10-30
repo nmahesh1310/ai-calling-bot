@@ -1,0 +1,22 @@
+[2025-10-15 22:59:36] Agent: Hello! Welcome to Rupeek. We have a personal loan offer for you. Are you interested?
+[2025-10-15 22:59:56] User: yes I am interested
+[2025-10-15 23:00:00] Agent: Sorry, I couldn't understand. Can you repeat?
+[2025-10-15 23:00:05] User: I am interested
+[2025-10-15 23:00:09] Agent: Sorry, I couldn't understand. Can you repeat?
+[2025-10-15 23:00:24] User: yes I am interested
+[2025-10-16 11:24:58] Agent: Hello! Welcome to Rupeek. We have a personal loan offer for you. Are you interested?
+[2025-10-16 11:25:20] User: yes
+[2025-10-16 11:25:20] Agent: Great! Let's guide you through the loan disbursal process.
+[2025-10-16 11:25:20] Agent: Step 1: Open the Rupeek app.
+[2025-10-16 11:25:35] User: i have opened the app
+[2025-10-16 11:25:35] Agent: Step 2: On the home screen, click the Cash banner.
+[2025-10-16 11:25:44] User: ok
+[2025-10-16 11:25:44] Agent: Step 3: Click on it.
+[2025-10-16 11:25:52] User: emi
+[2025-10-16 11:25:52] Agent: Step 4: Check your pre-approved limit.
+[2025-10-16 11:26:07] User: bank account
+[2025-10-16 11:26:07] Agent: Step 5: Slide the slider to select the amount and tenure required.
+[2025-10-16 11:27:30] User: email
+[2025-10-16 11:27:30] Agent: Step 6: Tick the consent box to proceed.
+[2025-10-16 11:27:39] User: mandate
+[2025-10-16 11:27:39] Agent: Step 7: Add your bank account if not visible.
