@@ -4,9 +4,7 @@ import base64
 import tempfile
 import time
 import requests
-import simpleaudio as sa
-import sounddevice as sd
-import wavio
+print("🎧 Audio libraries disabled for Render deployment (text-only mode).")
 from dotenv import load_dotenv
 import difflib  # for fuzzy matching FAQ questions
 
@@ -50,7 +48,6 @@ else:
 # STEP 0.6: IMPROVED FAQ MATCHING
 # ======================================================
 def normalize_text(text: str) -> str:
-    """Normalize text for better matching."""
     text = text.lower()
     replacements = {
         "preapproved": "pre-approved",
@@ -67,31 +64,23 @@ def normalize_text(text: str) -> str:
     return text.strip()
 
 def find_best_faq_match(user_query: str, threshold: float = 0.65):
-    """Find best FAQ answer using fuzzy and semantic normalization."""
     if not faq_data:
         return None
-
     query = normalize_text(user_query)
     questions = [normalize_text(item["question"]) for item in faq_data]
-
-    # Try direct fuzzy match
     best_match = difflib.get_close_matches(query, questions, n=1, cutoff=threshold)
-
     if best_match:
         matched_q = best_match[0]
         for item in faq_data:
             if normalize_text(item["question"]) == matched_q:
                 return item["answer"]
-
-    # Try partial keyword match
     for item in faq_data:
         if any(word in query for word in normalize_text(item["question"]).split()):
             return item["answer"]
-
     return None
 
 # ======================================================
-# STEP 1: SARVAM TTS
+# STEP 1: SARVAM TTS (text-only fallback)
 # ======================================================
 def text_to_speech_file(text: str):
     payload = {
@@ -113,41 +102,19 @@ def text_to_speech_file(text: str):
     return tmp.name
 
 def tts_and_play(text: str):
-    try:
-        fn = text_to_speech_file(text)
-        wave_obj = sa.WaveObject.from_wave_file(fn)
-        play = wave_obj.play()
-        play.wait_done()
-        os.remove(fn)
-    except Exception as e:
-        print(f"TTS playback error: {e}")
-        print("Fallback (text only):", text)
+    """Text-only simulation on Render."""
+    print("🗣️ Bot says:", text)
 
 # ======================================================
-# STEP 2: SARVAM STT
+# STEP 2: STT simulation (Render doesn’t support mic)
 # ======================================================
 def record_audio(filename="audio/input.wav", duration=5):
-    print("🎙 Listening... (speak now)")
-    fs = 16000
-    recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype="int16")
-    sd.wait()
-    wavio.write(filename, recording, fs, sampwidth=2)
-    print("✅ Recorded.\n")
+    print("(Simulated recording — Render does not support microphone input)")
     return filename
 
 def stt_from_file(audio_file: str) -> str:
-    headers = {"api-subscription-key": SARVAM_API_KEY}
-    files = {"file": ("audio.wav", open(audio_file, "rb"), "audio/wav")}
-    data = {"model": SARVAM_STT_MODEL, "language_code": "en-IN", "input_audio_codec": "wav"}
-    try:
-        r = requests.post(SARVAM_STT_URL, files=files, data=data, headers=headers, timeout=20)
-        r.raise_for_status()
-        return r.json().get("transcript") or r.json().get("text", "")
-    except Exception as e:
-        print("STT Error:", e)
-        return ""
-    finally:
-        files["file"][1].close()
+    """Simulate user input on Render by reading from console."""
+    return input("💬 Type your response: ")
 
 # ======================================================
 # STEP 3: GEMINI QA
@@ -159,7 +126,7 @@ def ask_gemini(user_query: str):
         return faq_answer
 
     context = f"""
-You are Rupeek’s intelligent voice assistant.
+You are Rupeek’s intelligent assistant.
 Answer only about Rupeek Personal Loans (interest rates, tenure, documents, processing time, eligibility, app usage).
 Keep responses short, clear, and conversational.
 If user says they are not interested, acknowledge politely and stop.
@@ -185,10 +152,9 @@ def run_sales_flow():
         "We’re offering instant personal loans with low interest rates and quick approval. "
         "Would you like to know your pre-approved loan limit?"
     )
-    print("🎤 Bot:", pitch)
+    print("\n🎤 Bot:", pitch)
     tts_and_play(pitch)
 
-    record_audio(duration=4)
     user_text = stt_from_file("audio/input.wav").lower()
     print("👂 You said:", user_text)
 
@@ -204,11 +170,10 @@ def run_sales_flow():
         tts_and_play(ack)
 
         while True:
-            prompt = "Please ask your question about Rupeek Personal Loans. Say 'no doubts' to finish."
+            prompt = "Please ask your question about Rupeek Personal Loans. Type 'no doubts' to finish."
             print("Bot:", prompt)
             tts_and_play(prompt)
 
-            record_audio(duration=5)
             query = stt_from_file("audio/input.wav")
             print("👂 You asked:", query)
 
@@ -231,7 +196,7 @@ def run_sales_flow():
 # MAIN
 # ======================================================
 if __name__ == "__main__":
-    print("🤖 Rupeek Voice Agent Started!\n")
+    print("🤖 Rupeek Voice Agent (Render Mode — Text I/O)\n")
     try:
         run_sales_flow()
     except KeyboardInterrupt:
