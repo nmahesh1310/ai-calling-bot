@@ -94,12 +94,12 @@ def trigger_call():
     if not customer_number:
         return jsonify({"error": "mobile number required"}), 400
 
-    EXOTEL_SID = os.getenv("EXOTEL_SID")
+    EXOTEL_SID = os.getenv("EXOTEL_SID", "rupeekfintech13")
     EXOTEL_TOKEN = os.getenv("EXOTEL_TOKEN")
-    EXOPHONE = os.getenv("EXOPHONE")
+    EXOPHONE = os.getenv("EXOPHONE", "08069489493")
     EXOTEL_SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com")
 
-    BOT_URL = "https://your-render-app-url.onrender.com/voice_flow"
+    BOT_URL = "https://ai-calling-bot-rqw5.onrender.com/voice_flow"
 
     url = f"https://{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/connect"
 
@@ -108,7 +108,7 @@ def trigger_call():
         "To": customer_number,
         "CallerId": EXOPHONE,
         "Url": BOT_URL,
-        "CallType": "trans",  # transactional
+        "CallType": "trans",
     }
 
     response = requests.post(
@@ -117,12 +117,18 @@ def trigger_call():
         auth=HTTPBasicAuth(EXOTEL_SID, EXOTEL_TOKEN),
     )
 
-    if response.status_code == 200:
+    if response.status_code in [200, 201]:
         print("✅ Outbound call triggered successfully!")
-        return jsonify({"status": "success", "response": response.json()})
+        return jsonify({
+            "status": "success",
+            "response": response.text
+        }), 200
     else:
         print(f"❌ Call trigger failed: {response.status_code}")
-        return jsonify({"status": "failed", "response": response.text}), response.status_code
+        return jsonify({
+            "status": "failed",
+            "response": response.text
+        }), response.status_code
 
 # ----------------------------
 #  Entry Point
