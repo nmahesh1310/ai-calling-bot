@@ -1,6 +1,8 @@
 import os
 import json
+import requests
 from flask import Flask, request, jsonify, Response
+from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
 
 # ----------------------------
@@ -49,9 +51,8 @@ def run_sales_flow(user_message=None):
         return say("Sorry, could you please clarify that?")
 
 # ----------------------------
-#  API Endpoints (for web use)
+#  Basic API Endpoints
 # ----------------------------
-
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"status": "ok", "message": "Rupeek Voice Agent API active"})
@@ -64,9 +65,8 @@ def chat():
     return jsonify({"response": response})
 
 # ----------------------------
-#  Exotel Voice Flow Endpoints
+#  Exotel Voice Flow (Inbound)
 # ----------------------------
-
 @app.route("/voice_flow", methods=["POST", "GET"])
 def voice_flow():
     """
@@ -97,6 +97,51 @@ def handle_input():
     <Hangup/>
 </Response>"""
     return Response(xml, mimetype='text/xml')
+
+# ----------------------------
+#  Exotel Outbound Call Trigger
+# ----------------------------
+@app.route("/trigger_call", methods=["POST"])
+def trigger_call():
+    """
+    Trigger an outbound call via Exotel to connect user to the Voicebot.
+    Input JSON: {"mobile": "+919599388645"}
+    """
+    data = request.get_json(force=True)
+    customer_number = data.get("mobile")
+
+    if not customer_number:
+        return jsonify({"error": "mobile number required"}), 400
+
+    EXOTEL_SID = os.getenv("EXOTEL_SID")
+    EXOTEL_TOKEN = os.getenv("EXOTEL_TOKEN")
+    EXOPHONE = os.getenv("EXOPHONE", "08069489493")  # default exophone
+    EXOTEL_SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com")
+
+    BOT_URL = "https://ai-calling-bot-rqw5.onrender.com/voice_flow"
+
+    url = f"https://{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/connect"
+
+    payload = {
+        "From": EXOPHONE,
+        "To": customer_number,
+        "CallerId": EXOPHONE,
+        "Url": BOT_URL,
+        "CallType": "trans",  # transactional
+    }
+
+    response = requests.post(
+        url,
+        data=payload,
+        auth=HTTPBasicAuth(EXOTEL_SID, EXOTEL_TOKEN),
+    )
+
+    if response.status_code == 200:
+        print("✅ Call triggered successfully!")
+        return jsonify({"status": "success", "response": response.json()})
+    else:
+        print(f"❌ Call trigger failed: {response.status_code}")
+        return jsonify({"status": "failed", "response": response.text}), response.status_code
 
 # ----------------------------
 #  Entry Point
