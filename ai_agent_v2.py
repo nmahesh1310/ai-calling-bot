@@ -18,8 +18,9 @@ def say(text):
     print(f"🗣️ Bot says: {text}")
     return text
 
+
 def run_sales_flow(user_message=None):
-    """Simple AI voice flow for personal loan outbound bot."""
+    """Simple AI voice flow for Rupeek Personal Loan bot."""
     if not user_message:
         return say("Hi! I’m calling from Rupeek. We’re offering instant personal loans with low interest rates and quick approval. Would you like to know your pre-approved loan limit?")
 
@@ -38,6 +39,7 @@ def run_sales_flow(user_message=None):
     else:
         return say("Sorry, could you please repeat that?")
 
+
 # ----------------------------
 #  Health Check
 # ----------------------------
@@ -45,31 +47,27 @@ def run_sales_flow(user_message=None):
 def home():
     return jsonify({"status": "ok", "message": "Rupeek outbound voice agent active"})
 
+
 # ----------------------------
-#  Exotel Voice Flow (TTS/STT)
+#  Voice Flow (Exotel → Bot)
 # ----------------------------
 @app.route("/voice_flow", methods=["POST", "GET"])
 def voice_flow():
-    """
-    Exotel will call this URL when the outbound call starts.
-    For TTS–STT flow, it just speaks the bot message.
-    """
+    """Called by Exotel when call connects — plays first bot message."""
     first_line = run_sales_flow()
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="female">{first_line}</Say>
 </Response>"""
-    return Response(xml, mimetype='text/xml')
+    return Response(xml, mimetype="text/xml")
+
 
 # ----------------------------
-#  Webhook for user speech (optional)
+#  User Speech Webhook (optional STT)
 # ----------------------------
 @app.route("/user_speech", methods=["POST"])
 def user_speech():
-    """
-    This endpoint receives user's transcribed speech (via Exotel STT or your ASR module)
-    and returns the next bot reply as XML.
-    """
+    """Receives user's transcribed response and returns next bot reply."""
     user_msg = request.form.get("SpeechResult") or request.json.get("message", "")
     bot_reply = run_sales_flow(user_msg)
 
@@ -77,7 +75,8 @@ def user_speech():
 <Response>
     <Say voice="female">{bot_reply}</Say>
 </Response>"""
-    return Response(xml, mimetype='text/xml')
+    return Response(xml, mimetype="text/xml")
+
 
 # ----------------------------
 #  Outbound Call Trigger
@@ -94,6 +93,7 @@ def trigger_call():
     if not customer_number:
         return jsonify({"error": "mobile number required"}), 400
 
+    # Environment variables
     EXOTEL_SID = os.getenv("EXOTEL_SID", "rupeekfintech13")
     EXOTEL_TOKEN = os.getenv("EXOTEL_TOKEN")
     EXOPHONE = os.getenv("EXOPHONE", "08069489493")
@@ -101,14 +101,14 @@ def trigger_call():
 
     BOT_URL = "https://ai-calling-bot-rqw5.onrender.com/voice_flow"
 
+    # Exotel requires From=customer, To=exophone
     url = f"https://{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/connect"
-
     payload = {
-        "From": EXOPHONE,
-        "To": customer_number,
+        "From": customer_number,   # customer number to be called
+        "To": EXOPHONE,            # your Exophone
         "CallerId": EXOPHONE,
         "Url": BOT_URL,
-        "CallType": "trans",
+        "CallType": "trans",       # transactional
     }
 
     response = requests.post(
@@ -129,6 +129,7 @@ def trigger_call():
             "status": "failed",
             "response": response.text
         }), response.status_code
+
 
 # ----------------------------
 #  Entry Point
