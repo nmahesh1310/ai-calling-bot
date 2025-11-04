@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import tempfile
 import requests
 from flask import Flask, request, jsonify, Response
 from requests.auth import HTTPBasicAuth
@@ -10,7 +11,7 @@ from dotenv import load_dotenv
 #  SETUP
 # ================================================================
 load_dotenv()
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static")
 
 # Environment Variables
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
@@ -20,8 +21,11 @@ EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
 EXOPHONE = os.getenv("EXOPHONE", "08069489493")
 EXOTEL_SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com")
 
+# Base URL (Render service)
+BASE_URL = "https://ai-calling-bot-rqw5.onrender.com"
+
 # ================================================================
-#  LOAN STEPS & FAQS (from Twilio version)
+#  LOAN STEPS & FAQS
 # ================================================================
 loan_steps = [
     "Open the Rupeek app.",
@@ -49,12 +53,12 @@ FAQ_BANK = [
 ]
 
 # ================================================================
-#  SARVAM TTS — Generate and Return Playable URL
+#  SARVAM TTS — Generate WAV File
 # ================================================================
 def text_to_speech_file(text: str):
-    """Convert text to speech (wav) via Sarvam API and save in /static."""
+    """Convert text to speech (wav) via Sarvam API and store in /static folder."""
     if not SARVAM_API_KEY:
-        print("⚠️ SARVAM_API_KEY missing — using plain text fallback.")
+        print("⚠️ SARVAM_API_KEY missing — skipping TTS.")
         return None
 
     url = "https://api.sarvam.ai/text-to-speech"
@@ -75,20 +79,20 @@ def text_to_speech_file(text: str):
         r.raise_for_status()
         audio_b64 = r.json().get("audios", [None])[0]
         if not audio_b64:
-            print("⚠️ TTS returned empty audio.")
+            print("⚠️ No audio returned from Sarvam API")
             return None
 
-        # Save to /static folder
-        os.makedirs("static", exist_ok=True)
-        file_path = os.path.join("static", "tts_intro.wav")
+        # Save to static folder
+        audio_bytes = base64.b64decode(audio_b64)
+        filename = "tts_intro.wav"
+        static_path = os.path.join(app.static_folder, filename)
+        with open(static_path, "wb") as f:
+            f.write(audio_bytes)
 
-        with open(file_path, "wb") as f:
-            f.write(base64.b64decode(audio_b64))
-
-        print(f"✅ TTS audio saved to {file_path}")
-        return file_path
+        print(f"✅ TTS file saved: {static_path}")
+        return f"{BASE_URL}/static/{filename}"
     except Exception as e:
-        print("❌ TTS failed:", e)
+        print("❌ TTS generation failed:", e)
         return None
 
 
@@ -101,12 +105,11 @@ def run_sales_pitch():
 
 
 def get_bot_reply(user_message=None):
-    """Simple conversational flow based on user input."""
+    """Return conversational text based on user input."""
     if not user_message:
         return run_sales_pitch()
 
     user_message = user_message.lower()
-
     if "yes" in user_message:
         return "Great! Please open the Rupeek app. I will guide you step by step."
     elif "no" in user_message:
@@ -118,98 +121,78 @@ def get_bot_reply(user_message=None):
 
 
 # ================================================================
-#  FLASK ROUTES
+#  ROUTES
 # ================================================================
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"status": "ok", "message": "Rupeek outbound voice agent active"})
 
 
-# -----------------------------
-#  Voice flow (played on call connect)
-# -----------------------------
+# --- 1️⃣ VOICE FLOW (played during call) ---
 @app.route("/voice_flow", methods=["POST", "GET"])
 def voice_flow():
-    """Called by Exotel when the call connects — plays TTS audio."""
+    """Called by Exotel when the call connects — returns XML with <Play> audio file."""
     line = get_bot_reply()
     print(f"🗣️ Sending to caller: {line}")
 
-    # Generate Sarvam TTS file and save in /static
-    audio_path = text_to_speech_file(line)
-    if audio_path:
-        # Move the file to static folder so Exotel can access it publicly
-        static_audio_path = os.path.join("static", "tts_intro.wav")
-        os.replace(audio_path, static_audio_path)
+    tts_url = text_to_speech_file(line) or f"{BASE_URL}/static/tts_intro.wav"
 
-        audio_url = "https://ai-calling-bot-rqw5.onrender.com/static/tts_intro.wav"
-
-        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Play>{audio_url}</Play>
+    <Play>{tts_url}</Play>
 </Response>"""
-    else:
-        # fallback if TTS fails
-        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say voice="female">{line}</Say>
-</Response>"""
-
     return Response(xml, mimetype="text/xml")
 
 
+# --- 2️⃣ TEST TTS ROUTE ---
+@app.route("/test_tts", methods=["GET"])
+def test_tts():
+    """Generate test TTS and return its public URL."""
+    text = "This is a test message from Rupeek bot. If you hear this, your TTS is working correctly."
+    tts_url = text_to_speech_file(text)
+    if not tts_url:
+        return jsonify({"error": "TTS generation failed"}), 500
+    return jsonify({"tts_url": tts_url})
 
-# -----------------------------
-#  Trigger outbound call via Exotel
-# -----------------------------
+
+# --- 3️⃣ EXOTEL CALL TRIGGER ---
 @app.route("/trigger_call", methods=["POST"])
 def trigger_call():
-    """Trigger an outbound call through Exotel API."""
+    """Trigger an outbound call through Exotel."""
     data = request.get_json(force=True)
     customer_number = data.get("mobile")
 
     if not customer_number:
         return jsonify({"error": "mobile number required"}), 400
 
-    BOT_URL = "https://ai-calling-bot-rqw5.onrender.com/voice_flow"
+    BOT_URL = f"{BASE_URL}/voice_flow"
 
-    # --- Debug logs (safe masking) ---
-    print(f"[DEBUG] Using EXOTEL_SID: {EXOTEL_SID}")
-    print(f"[DEBUG] Using EXOTEL_API_KEY (first 6): {EXOTEL_API_KEY[:6]}****")
-    print(f"[DEBUG] Using EXOTEL_API_TOKEN (first 6): {EXOTEL_API_TOKEN[:6]}****")
-    print(f"[DEBUG] Using EXOPHONE: {EXOPHONE}")
-    print(f"[DEBUG] Endpoint: https://{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/connect")
+    print(f"[DEBUG] EXOTEL_SID: {EXOTEL_SID}")
+    print(f"[DEBUG] EXOTEL_API_KEY: {EXOTEL_API_KEY[:4]}****")
+    print(f"[DEBUG] EXOTEL_API_TOKEN: {EXOTEL_API_TOKEN[:4]}****")
+    print(f"[DEBUG] Calling: {customer_number}")
 
     payload = {
-        "From": customer_number,   # customer number to call
-        "To": EXOPHONE,            # your Exophone
+        "From": customer_number,
+        "To": EXOPHONE,
         "CallerId": EXOPHONE,
         "Url": BOT_URL,
         "CallType": "trans"
     }
 
-    try:
-        response = requests.post(
-            f"https://{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/connect",
-            data=payload,
-            auth=HTTPBasicAuth(EXOTEL_API_KEY, EXOTEL_API_TOKEN),
-        )
+    response = requests.post(
+        f"https://{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/connect",
+        data=payload,
+        auth=HTTPBasicAuth(EXOTEL_API_KEY, EXOTEL_API_TOKEN),
+    )
 
-        print(f"[DEBUG] Exotel response: {response.status_code}")
-        print(response.text[:500])
+    print(f"[DEBUG] Exotel response: {response.status_code}")
+    print(response.text[:300])
 
-        if response.status_code in [200, 201]:
-            print("✅ Outbound call triggered successfully!")
-            return jsonify({"status": "success", "response": response.text}), 200
-        else:
-            print("❌ Call trigger failed.")
-            return jsonify({
-                "status": "failed",
-                "error": f"{response.status_code} Unauthorized",
-                "details": response.text
-            }), response.status_code
-    except Exception as e:
-        print("❌ Exception during call trigger:", e)
-        return jsonify({"status": "failed", "error": str(e)}), 500
+    if response.status_code in [200, 201]:
+        return jsonify({"status": "success", "response": response.text}), 200
+    else:
+        return jsonify({"status": "failed", "response": response.text}), response.status_code
 
 
 # ================================================================
