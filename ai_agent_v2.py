@@ -21,7 +21,7 @@ EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
 EXOPHONE = os.getenv("EXOPHONE", "08069489493")
 EXOTEL_SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com")
 
-# Base URL (Render service)
+# Base URL (Render Service)
 BASE_URL = "https://ai-calling-bot-rqw5.onrender.com"
 
 # ================================================================
@@ -75,24 +75,34 @@ def text_to_speech_file(text: str):
     }
 
     try:
+        print("🚀 Calling Sarvam TTS API...")
         r = requests.post(url, json=payload, headers=headers, timeout=20)
-        r.raise_for_status()
-        audio_b64 = r.json().get("audios", [None])[0]
-        if not audio_b64:
-            print("⚠️ No audio returned from Sarvam API")
+        print(f"🌐 Sarvam API Response Code: {r.status_code}")
+        print(f"📜 Sarvam API Response Text (first 500 chars): {r.text[:500]}")
+
+        # If request failed, log and exit
+        if r.status_code != 200:
+            print("❌ Sarvam API call failed.")
             return None
 
-        # Save to static folder
+        data = r.json()
+        audio_b64 = data.get("audios", [None])[0]
+        if not audio_b64:
+            print("⚠️ No audio data in Sarvam response.")
+            return None
+
+        # Save the audio file locally in static/
         audio_bytes = base64.b64decode(audio_b64)
         filename = "tts_intro.wav"
         static_path = os.path.join(app.static_folder, filename)
         with open(static_path, "wb") as f:
             f.write(audio_bytes)
 
-        print(f"✅ TTS file saved: {static_path}")
+        print(f"✅ TTS file saved successfully: {static_path}")
         return f"{BASE_URL}/static/{filename}"
+
     except Exception as e:
-        print("❌ TTS generation failed:", e)
+        print("🔥 Exception during Sarvam TTS call:", str(e))
         return None
 
 
