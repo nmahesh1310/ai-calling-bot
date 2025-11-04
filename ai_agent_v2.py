@@ -1,7 +1,6 @@
 import os
 import json
 import base64
-import tempfile
 import requests
 from flask import Flask, request, jsonify, Response
 from requests.auth import HTTPBasicAuth
@@ -53,7 +52,7 @@ FAQ_BANK = [
 #  SARVAM TTS — Generate and Return Playable URL
 # ================================================================
 def text_to_speech_file(text: str):
-    """Convert text to speech (wav) via Sarvam API and return local file path."""
+    """Convert text to speech (wav) via Sarvam API and save in /static."""
     if not SARVAM_API_KEY:
         print("⚠️ SARVAM_API_KEY missing — using plain text fallback.")
         return None
@@ -70,6 +69,7 @@ def text_to_speech_file(text: str):
         "api-subscription-key": SARVAM_API_KEY,
         "Content-Type": "application/json"
     }
+
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=20)
         r.raise_for_status()
@@ -77,11 +77,16 @@ def text_to_speech_file(text: str):
         if not audio_b64:
             print("⚠️ TTS returned empty audio.")
             return None
-        audio_bytes = base64.b64decode(audio_b64)
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-        tmp.write(audio_bytes)
-        tmp.close()
-        return tmp.name
+
+        # Save to /static folder
+        os.makedirs("static", exist_ok=True)
+        file_path = os.path.join("static", "tts_intro.wav")
+
+        with open(file_path, "wb") as f:
+            f.write(base64.b64decode(audio_b64))
+
+        print(f"✅ TTS audio saved to {file_path}")
+        return file_path
     except Exception as e:
         print("❌ TTS failed:", e)
         return None
@@ -125,18 +130,32 @@ def home():
 # -----------------------------
 @app.route("/voice_flow", methods=["POST", "GET"])
 def voice_flow():
-    """Called by Exotel when the call connects — plays initial line."""
+    """Called by Exotel when the call connects — plays TTS audio."""
     line = get_bot_reply()
     print(f"🗣️ Sending to caller: {line}")
 
-    # Optional: Generate TTS file (if you want to store or debug)
-    text_to_speech_file(line)
+    # Generate Sarvam TTS file and save in /static
+    audio_path = text_to_speech_file(line)
+    if audio_path:
+        # Move the file to static folder so Exotel can access it publicly
+        static_audio_path = os.path.join("static", "tts_intro.wav")
+        os.replace(audio_path, static_audio_path)
 
-    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+        audio_url = "https://ai-calling-bot-rqw5.onrender.com/static/tts_intro.wav"
+
+        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Play>{audio_url}</Play>
+</Response>"""
+    else:
+        # fallback if TTS fails
+        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="female">{line}</Say>
 </Response>"""
+
     return Response(xml, mimetype="text/xml")
+
 
 
 # -----------------------------
@@ -172,7 +191,7 @@ def trigger_call():
         response = requests.post(
             f"https://{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/connect",
             data=payload,
-            auth=HTTPBasicAuth(EXOTEL_API_KEY, EXOTEL_API_TOKEN),  # ✅ correct authentication
+            auth=HTTPBasicAuth(EXOTEL_API_KEY, EXOTEL_API_TOKEN),
         )
 
         print(f"[DEBUG] Exotel response: {response.status_code}")
