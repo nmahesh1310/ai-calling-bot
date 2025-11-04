@@ -115,30 +115,58 @@ def voice_flow():
 # ----------------------------
 @app.route("/trigger_call", methods=["POST"])
 def trigger_call():
-    """Trigger Exotel outbound call."""
+    """
+    Trigger an outbound call through Exotel.
+    Input JSON: {"mobile": "+919599388645"}
+    """
     data = request.get_json(force=True)
-    mobile = data.get("mobile")
-    if not mobile:
+    customer_number = data.get("mobile")
+
+    if not customer_number:
         return jsonify({"error": "mobile number required"}), 400
 
-    url = f"https://{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/connect"
+    # Read from environment
+    EXOTEL_SID = os.getenv("EXOTEL_SID", "rupeekfintech13")
+    EXOTEL_TOKEN = os.getenv("EXOTEL_TOKEN")
+    EXOPHONE = os.getenv("EXOPHONE", "08069489493")
+    EXOTEL_SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com")
+
+    BOT_URL = "https://ai-calling-bot-rqw5.onrender.com/voice_flow"
+
+    # --- Debug logs (safe masking) ---
+    print(f"[DEBUG] Using EXOTEL_SID: {EXOTEL_SID}")
+    print(f"[DEBUG] Using EXOTEL_TOKEN (first 4 chars): {EXOTEL_TOKEN[:4] if EXOTEL_TOKEN else 'None'}****")
+    print(f"[DEBUG] Using EXOPHONE: {EXOPHONE}")
+    print(f"[DEBUG] Exotel API endpoint: https://{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/connect")
+
+    # Prepare payload
     payload = {
-        "From": mobile,
-        "To": EXOPHONE,
+        "From": customer_number,   # customer number to be called
+        "To": EXOPHONE,            # your Exophone
         "CallerId": EXOPHONE,
-        "Url": "https://ai-calling-bot-rqw5.onrender.com/voice_flow",
-        "CallType": "trans"
+        "Url": BOT_URL,
+        "CallType": "trans",
     }
 
+    # Make the request
     response = requests.post(
-        url,
+        f"https://{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/connect",
         data=payload,
-        auth=HTTPBasicAuth(EXOTEL_API_KEY, EXOTEL_API_TOKEN)
+        auth=HTTPBasicAuth(EXOTEL_SID, EXOTEL_TOKEN),
     )
 
+    print(f"[DEBUG] Exotel response status: {response.status_code}")
+    print(f"[DEBUG] Exotel response text: {response.text[:300]}")  # truncate to avoid flooding logs
+
+    # Return structured output
     if response.status_code in [200, 201]:
-        return jsonify({"status": "success", "details": response.text}), 200
+        print("✅ Outbound call triggered successfully!")
+        return jsonify({
+            "status": "success",
+            "response": response.text
+        }), 200
     else:
+        print(f"❌ Call trigger failed: {response.status_code}")
         return jsonify({
             "status": "failed",
             "error": f"Unauthorized ({response.status_code})",
