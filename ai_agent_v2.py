@@ -6,10 +6,14 @@ import os
 import json
 import base64
 import asyncio
-import audioop
 import logging
 import wave
 import io
+try:
+    import audioop  # Python <3.13
+except ModuleNotFoundError:
+    import audioop_lts as audioop  # Python ≥3.13
+
 from typing import Optional, Tuple
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
