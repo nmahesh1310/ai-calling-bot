@@ -4,3 +4,8 @@ sounddevice
 simpleaudio
 python-dotenv
 flask
+fastapi
+uvicorn[standard]
+aiohttp
+python-dotenv
+requests
