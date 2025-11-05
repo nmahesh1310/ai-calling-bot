@@ -8,3 +8,4 @@ fastapi
 uvicorn
 python-dotenv
 requests
+audioop-lts; python_version>='3.13'  # only if your Python is 3.13+ (Render shows 3.13)
