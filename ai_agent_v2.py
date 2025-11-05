@@ -1,31 +1,44 @@
 import os
 import json
 import base64
-import tempfile
-import requests
-from flask import Flask, request, jsonify, Response
-from requests.auth import HTTPBasicAuth
+import logging
+import aiohttp
+import asyncio
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi.responses import Response, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from requests.auth import HTTPBasicAuth
+import requests
 
 # ================================================================
 #  SETUP
 # ================================================================
 load_dotenv()
-app = Flask(__name__, static_folder="static")
+logging.basicConfig(level=logging.INFO)
 
-# Environment Variables
+app = FastAPI(title="Rupeek WebSocket Voicebot")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
-EXOTEL_SID = os.getenv("EXOTEL_SID", "rupeekfintech13")
+EXOTEL_SID = os.getenv("EXOTEL_SID")
 EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
 EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
-EXOPHONE = os.getenv("EXOPHONE", "08069489493")
+EXOPHONE = os.getenv("EXOPHONE", "")
 EXOTEL_SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com")
+BASE_URL = os.getenv("BASE_URL", "https://ai-calling-bot-rqw5.onrender.com")
 
-# Base URL (Render Service)
-BASE_URL = "https://ai-calling-bot-rqw5.onrender.com"
+SARVAM_STT_WS = "wss://api.sarvam.ai/speech-to-text/ws"
+SARVAM_TTS_WS = "wss://api.sarvam.ai/text-to-speech/ws"
 
 # ================================================================
-#  LOAN STEPS & FAQS
+#  BOT LOGIC
 # ================================================================
 loan_steps = [
     "Open the Rupeek app.",
@@ -34,7 +47,7 @@ loan_steps = [
     "Slide the slider to select the amount and tenure required.",
     "Tick the consent box to proceed.",
     "Add your bank account if not visible.",
-    "Update your email ID and address, then select proceed to mandate setup.",
+    "Update your email ID and address, then proceed to mandate setup.",
     "Setup autopay for EMI deduction on 5th of each month.",
     "Once mandate setup is done, you will see the loan summary page.",
     "Review loan details and click 'Get Money Now'.",
@@ -43,172 +56,175 @@ loan_steps = [
 
 FAQ_BANK = [
     (["rate of interest", "interest rate", "roi"],
-     "The interest rate is personalized for each user. Once you reach the loan summary page after selecting the amount and tenure, you'll see the exact rate."),
-    (["should i open the app", "open the rupeek app"],
+     "The interest rate is personalized for each user. Once you reach the loan summary page, you'll see the exact rate."),
+    (["open the app", "rupeek app"],
      "Please open the Rupeek app and I will guide you step by step to check your offer."),
     (["consent box", "tick box"],
-     "There is a consent tick box on the screen. Please select it to proceed to the next step."),
-    (["add bank account", "bank not visible"],
-     "Make sure you're adding a bank account that belongs to you. If it doesn't match your name, it will not be accepted.")
+     "There is a consent box on the screen. Please select it to proceed."),
+    (["add bank", "bank not visible"],
+     "Make sure the bank account belongs to you. If not, it won’t be accepted.")
 ]
 
-# ================================================================
-#  SARVAM TTS — Generate WAV File
-# ================================================================
-def text_to_speech_file(text: str):
-    """Convert text to speech (wav) via Sarvam API and store in /static folder."""
-    if not SARVAM_API_KEY:
-        print("⚠️ SARVAM_API_KEY missing — skipping TTS.")
-        return None
 
-    url = "https://api.sarvam.ai/text-to-speech"
-    payload = {
-        "text": text,
-        "target_language_code": "en-IN",
-        "speaker": "anushka",
-        "model": "bulbul:v2",
-        "output_audio_codec": "wav"
-    }
-    headers = {
-        "api-subscription-key": SARVAM_API_KEY,
-        "Content-Type": "application/json"
-    }
-
-    try:
-        print("🚀 Calling Sarvam TTS API...")
-        r = requests.post(url, json=payload, headers=headers, timeout=20)
-        print(f"🌐 Sarvam API Response Code: {r.status_code}")
-        print(f"📜 Sarvam API Response Text (first 500 chars): {r.text[:500]}")
-
-        # If request failed, log and exit
-        if r.status_code != 200:
-            print("❌ Sarvam API call failed.")
-            return None
-
-        data = r.json()
-        audio_b64 = data.get("audios", [None])[0]
-        if not audio_b64:
-            print("⚠️ No audio data in Sarvam response.")
-            return None
-
-        # Save the audio file locally in static/
-        audio_bytes = base64.b64decode(audio_b64)
-        filename = "tts_intro.wav"
-        static_path = os.path.join(app.static_folder, filename)
-        with open(static_path, "wb") as f:
-            f.write(audio_bytes)
-
-        print(f"✅ TTS file saved successfully: {static_path}")
-        return f"{BASE_URL}/static/{filename}"
-
-    except Exception as e:
-        print("🔥 Exception during Sarvam TTS call:", str(e))
-        return None
-
-
-# ================================================================
-#  BOT LOGIC
-# ================================================================
 def run_sales_pitch():
-    """First greeting line for the call."""
     return "Hi! I’m calling from Rupeek. You have a pre-approved personal loan offer. Would you like to check your loan eligibility now?"
 
 
-def get_bot_reply(user_message=None):
-    """Return conversational text based on user input."""
-    if not user_message:
+def get_bot_reply(user_input=None):
+    if not user_input:
         return run_sales_pitch()
-
-    user_message = user_message.lower()
-    if "yes" in user_message:
+    text = user_input.lower()
+    if "yes" in text:
         return "Great! Please open the Rupeek app. I will guide you step by step."
-    elif "no" in user_message:
+    if "no" in text:
         return "No worries. Have a nice day!"
     for variants, answer in FAQ_BANK:
-        if any(v in user_message for v in variants):
+        if any(v in text for v in variants):
             return answer
     return "Sorry, could you please repeat that?"
 
 
 # ================================================================
-#  ROUTES
+#  SARVAM WEBSOCKET INTEGRATION
 # ================================================================
-@app.route("/", methods=["GET"])
-def home():
-    return jsonify({"status": "ok", "message": "Rupeek outbound voice agent active"})
+async def sarvam_stt(audio_bytes: bytes) -> str:
+    """Stream caller audio to Sarvam STT and return transcript."""
+    params = "?language-code=en-IN&model=saarika:v2.5&input_audio_codec=pcm_s16le&sample_rate=16000"
+    headers = {"Api-Subscription-Key": SARVAM_API_KEY}
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(SARVAM_STT_WS + params, headers=headers) as ws:
+            # Send audio
+            msg = {
+                "audio": {
+                    "data": base64.b64encode(audio_bytes).decode(),
+                    "sample_rate": "16000",
+                    "encoding": "audio/wav",
+                    "input_audio_codec": "pcm_s16le"
+                }
+            }
+            await ws.send_str(json.dumps(msg))
+            # Send flush signal
+            await ws.send_str(json.dumps({"type": "flush"}))
+
+            # Wait for transcription
+            async for resp in ws:
+                data = json.loads(resp.data)
+                if data.get("type") == "data" and "transcript" in data["data"]:
+                    return data["data"]["transcript"]
+    return ""
 
 
-# --- 1️⃣ VOICE FLOW (played during call) ---
-@app.route("/voice_flow", methods=["POST", "GET"])
-def voice_flow():
-    """Called by Exotel when the call connects — returns XML with <Play> audio file."""
-    line = get_bot_reply()
-    print(f"🗣️ Sending to caller: {line}")
+async def sarvam_tts_stream(text: str):
+    """Stream TTS response as audio bytes."""
+    params = "?model=bulbul:v2&send_completion_event=true"
+    headers = {"Api-Subscription-Key": SARVAM_API_KEY}
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(SARVAM_TTS_WS + params, headers=headers) as ws:
+            # Step 1: Configure connection
+            config = {
+                "type": "config",
+                "data": {
+                    "target_language_code": "en-IN",
+                    "speaker": "anushka",
+                    "speech_sample_rate": "16000",
+                    "output_audio_codec": "wav"
+                }
+            }
+            await ws.send_str(json.dumps(config))
+            # Step 2: Send text
+            await ws.send_str(json.dumps({"type": "text", "data": {"text": text}}))
+            await ws.send_str(json.dumps({"type": "flush"}))
 
-    tts_url = text_to_speech_file(line) or f"{BASE_URL}/static/tts_intro.wav"
+            async for msg in ws:
+                data = json.loads(msg.data) if msg.type == aiohttp.WSMsgType.TEXT else None
+                if data and data.get("type") == "event":
+                    if data["data"].get("event_type") == "final":
+                        break
+                elif msg.type == aiohttp.WSMsgType.BINARY:
+                    yield msg.data
 
+
+# ================================================================
+#  EXOTEL → SARVAM LIVE STREAM HANDLER
+# ================================================================
+@app.websocket("/voice_stream")
+async def voice_stream(ws: WebSocket):
+    await ws.accept()
+    logging.info("🎧 Exotel connected to /voice_stream")
+
+    try:
+        # Initial greeting via TTS
+        greeting = run_sales_pitch()
+        async for chunk in sarvam_tts_stream(greeting):
+            await ws.send_bytes(chunk)
+
+        while True:
+            msg = await ws.receive()
+            if msg.type == aiohttp.WSMsgType.BINARY:
+                # Caller speech
+                transcript = await sarvam_stt(msg.data)
+                if transcript:
+                    logging.info(f"🗣️ Caller said: {transcript}")
+                    bot_reply = get_bot_reply(transcript)
+                    logging.info(f"🤖 Bot reply: {bot_reply}")
+                    async for chunk in sarvam_tts_stream(bot_reply):
+                        await ws.send_bytes(chunk)
+            elif msg.type == aiohttp.WSMsgType.CLOSE:
+                break
+    except WebSocketDisconnect:
+        logging.info("🔌 Exotel disconnected")
+    except Exception as e:
+        logging.error(f"❌ Error in voice_stream: {e}")
+    finally:
+        await ws.close()
+
+
+# ================================================================
+#  REST FALLBACK + TRIGGER CALL
+# ================================================================
+@app.get("/")
+async def home():
+    return JSONResponse({"status": "ok", "message": "Rupeek WebSocket voicebot active"})
+
+
+@app.post("/voice_flow")
+async def voice_flow():
+    """Fallback: non-WS version (for testing only)."""
+    line = run_sales_pitch()
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Play>{tts_url}</Play>
+    <Say>{line}</Say>
 </Response>"""
-    return Response(xml, mimetype="text/xml")
+    return Response(content=xml, media_type="text/xml")
 
 
-# --- 2️⃣ TEST TTS ROUTE ---
-@app.route("/test_tts", methods=["GET"])
-def test_tts():
-    """Generate test TTS and return its public URL."""
-    text = "This is a test message from Rupeek bot. If you hear this, your TTS is working correctly."
-    tts_url = text_to_speech_file(text)
-    if not tts_url:
-        return jsonify({"error": "TTS generation failed"}), 500
-    return jsonify({"tts_url": tts_url})
-
-
-# --- 3️⃣ EXOTEL CALL TRIGGER ---
-@app.route("/trigger_call", methods=["POST"])
-def trigger_call():
-    """Trigger an outbound call through Exotel."""
-    data = request.get_json(force=True)
-    customer_number = data.get("mobile")
-
-    if not customer_number:
-        return jsonify({"error": "mobile number required"}), 400
-
-    BOT_URL = f"{BASE_URL}/voice_flow"
-
-    print(f"[DEBUG] EXOTEL_SID: {EXOTEL_SID}")
-    print(f"[DEBUG] EXOTEL_API_KEY: {EXOTEL_API_KEY[:4]}****")
-    print(f"[DEBUG] EXOTEL_API_TOKEN: {EXOTEL_API_TOKEN[:4]}****")
-    print(f"[DEBUG] Calling: {customer_number}")
+@app.post("/trigger_call")
+async def trigger_call(req: Request):
+    data = await req.json()
+    number = data.get("mobile")
+    if not number:
+        return JSONResponse({"error": "mobile required"}, 400)
 
     payload = {
-        "From": customer_number,
+        "From": number,
         "To": EXOPHONE,
         "CallerId": EXOPHONE,
-        "Url": BOT_URL,
+        "Url": f"{BASE_URL}/voice_flow",
         "CallType": "trans"
     }
-
-    response = requests.post(
+    resp = requests.post(
         f"https://{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/connect",
         data=payload,
-        auth=HTTPBasicAuth(EXOTEL_API_KEY, EXOTEL_API_TOKEN),
+        auth=HTTPBasicAuth(EXOTEL_API_KEY, EXOTEL_API_TOKEN)
     )
-
-    print(f"[DEBUG] Exotel response: {response.status_code}")
-    print(response.text[:300])
-
-    if response.status_code in [200, 201]:
-        return jsonify({"status": "success", "response": response.text}), 200
-    else:
-        return jsonify({"status": "failed", "response": response.text}), response.status_code
-
+    return JSONResponse({"status": resp.status_code, "response": resp.text})
+    
 
 # ================================================================
 #  ENTRY POINT
 # ================================================================
 if __name__ == "__main__":
+    import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    print(f"📞 Rupeek outbound voice agent running on port {port}")
-    app.run(host="0.0.0.0", port=port)
+    logging.info(f"📞 Rupeek WebSocket Voicebot running on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
