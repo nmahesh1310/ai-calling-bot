@@ -1,9 +1,10 @@
-flask
-requests
-python-dotenv
 aiohttp
 websockets
 pydub
 simpleaudio
 sounddevice
 scipy
+fastapi
+uvicorn
+python-dotenv
+requests
