@@ -456,6 +456,73 @@ async def trigger_call(req: Request):
     except Exception as e:
         return JSONResponse({"status": "failed", "error": str(e)}, status_code=500)
 
+# ========================================
+# ✅ NEW ROUTE: Receive Exotel Media Chunks
+# ========================================
+
+@app.post("/exotel/chunk")
+async def exotel_chunk(req: Request):
+    """
+    Receives Exotel audio chunks (non-streaming mode).
+    Exotel POST body structure:
+    {
+        "event": "media",
+        "media": { "payload": "<base64_mu-law_bytes>" }
+    }
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        return JSONResponse({"status": "error", "reason": "invalid_json"}, status_code=400)
+
+    # Validate event
+    if body.get("event") != "media":
+        return JSONResponse({"status": "ignored", "reason": "not_media_event"}, status_code=200)
+
+    media = body.get("media", {})
+    payload_b64 = media.get("payload")
+
+    if not payload_b64:
+        return JSONResponse({"status": "ignored", "reason": "empty_payload"}, status_code=200)
+
+    # Decode μ-law audio
+    try:
+        mulaw_bytes = base64.b64decode(payload_b64)
+    except Exception as e:
+        log.error(f"base64 decode error: {e}")
+        return JSONResponse({"status": "error", "reason": "decode_failed"}, status_code=400)
+
+    # Convert μ-law → PCM16
+    try:
+        pcm_lin16 = audioop.ulaw2lin(mulaw_bytes, 2)
+    except Exception as e:
+        log.error(f"μ-law decode error: {e}")
+        return JSONResponse({"status": "error", "reason": "mulaw_conversion_failed"}, status_code=500)
+
+    # Wrap into WAV (8000 Hz mono)
+    wav_data = wav_bytes_from_linear16(pcm_lin16, 8000)
+
+    transcript = ""
+    try:
+        # Send to Sarvam STT REST
+        stt_url = "https://api.sarvam.ai/speech-to-text"
+        files = {'file': ('audio.wav', wav_data, 'audio/wav')}
+        data = {"model": "saarika:v2.5", "language_code": "en-IN", "input_audio_codec": "wav"}
+        headers = {"api-subscription-key": SARVAM_API_KEY}
+
+        r = requests.post(stt_url, files=files, data=data, headers=headers, timeout=20)
+        j = r.json()
+        transcript = j.get("transcript") or j.get("text") or ""
+    except Exception as e:
+        log.error(f"STT request error: {e}")
+
+    log.info(f"✅ Chunk Received: {len(mulaw_bytes)} bytes | Transcript: '{transcript}'")
+
+    return {
+        "status": "ok",
+        "bytes_received": len(mulaw_bytes),
+        "transcript": transcript
+    }
 
 # ---------- Run (Render/Procfile runs this directly) ----------
 if __name__ == "__main__":
