@@ -183,92 +183,66 @@ async def tts_send_text(ws: ClientWebSocketResponse, text: str):
 
 # ---------------- WebSocket Bridge ----------------
 @app.websocket("/ws")
-async def ws_bridge(websocket: WebSocket):
-    await websocket.accept()
-    log.info("🔌 WebSocket connection accepted from Exotel")
+async def ws_echo_debug(websocket: WebSocket):
+    """
+    Exotel stream echo + diagnostic mode.
+    1. Confirms that Exotel can connect successfully.
+    2. Logs full WS lifecycle events.
+    3. Echoes back the same audio received to verify bidirectional stream.
+    """
+    log.info("🛰️ Incoming WebSocket request from Exotel... waiting to accept...")
+    try:
+        await websocket.accept()
+        log.info("🔌 WebSocket connection accepted from Exotel ✅")
+    except Exception as e:
+        log.error(f"❌ WS accept error: {e}")
+        return
 
-    async with aiohttp.ClientSession() as session:
-        stt_ws = await sarvam_stt_connect(session)
-        tts_ws = await sarvam_tts_connect(session)
-        await tts_send_config(tts_ws)
+    try:
+        while True:
+            msg = await websocket.receive()
 
-        # 👋 Initial greeting
-        await tts_send_text(tts_ws, run_sales_pitch())
+            # Handle binary audio
+            if "bytes" in msg and msg["bytes"]:
+                log.info(f"🎧 Received {len(msg['bytes'])} raw bytes (binary)")
+                await websocket.send_bytes(msg["bytes"])  # Echo back to caller
+                continue
 
-        inbound_queue = asyncio.Queue()
-        transcript_queue = asyncio.Queue()
+            # Handle text messages (Twilio/Exotel style JSON)
+            if "text" in msg and msg["text"]:
+                try:
+                    data = json.loads(msg["text"])
+                    event = data.get("event")
 
-        async def exotel_reader():
-            """Reads Exotel audio stream, saves chunks, sends to STT."""
-            try:
-                while True:
-                    msg = await websocket.receive()
-                    pcm = None
-                    if "text" in msg and msg["text"]:
-                        pcm = decode_exotel_inbound(msg["text"], False)
-                    elif "bytes" in msg and msg["bytes"]:
-                        pcm = decode_exotel_inbound(msg["bytes"], True)
-                    if pcm:
-                        save_audio_chunk(pcm, prefix="exotel_in")
-                        await inbound_queue.put(pcm)
-            except Exception as e:
-                log.error(f"Exotel reader error: {e}")
-            finally:
-                await transcript_queue.put("__DISCONNECT__")
-
-        async def stt_sender():
-            try:
-                while True:
-                    pcm = await inbound_queue.get()
-                    await send_audio_chunk_to_stt(stt_ws, pcm)
-            except Exception as e:
-                log.error(f"STT sender error: {e}")
-
-        async def stt_receiver():
-            try:
-                while True:
-                    msg = await stt_ws.receive()
-                    if msg.type == WSMsgType.TEXT:
-                        data = msg.json()
-                        if data.get("type") == "data":
-                            trans = data["data"].get("transcript", "")
-                            if trans:
-                                log.info(f"👂 User: {trans}")
-                                await transcript_queue.put(trans)
-            except Exception as e:
-                log.error(f"STT receiver error: {e}")
-
-        async def tts_worker():
-            try:
-                while True:
-                    transcript = await transcript_queue.get()
-                    if transcript == "__DISCONNECT__":
+                    if event == "media":
+                        payload = data["media"]["payload"]
+                        # Just echo back same payload
+                        out = {"event": "media", "media": {"payload": payload}}
+                        await websocket.send_text(json.dumps(out))
+                        log.info(f"🔁 Echoed one media frame ({len(payload)} bytes b64)")
+                    elif event == "start":
+                        log.info("🎙️ Exotel Stream started")
+                    elif event == "stop":
+                        log.info("🛑 Exotel Stream stopped")
                         break
-                    reply = get_bot_reply(transcript)
-                    log.info(f"🗣️ Bot: {reply}")
-                    await tts_send_text(tts_ws, reply)
+                    else:
+                        log.info(f"ℹ️ Received event: {event}")
+                except Exception as e:
+                    log.warning(f"JSON parse issue: {e}")
+                    continue
 
-                    # handle stream
-                    while True:
-                        try:
-                            m = await asyncio.wait_for(tts_ws.receive(), timeout=10)
-                        except asyncio.TimeoutError:
-                            log.warning("TTS timeout, moving to next reply.")
-                            break
-                        if m.type == WSMsgType.TEXT:
-                            jd = m.json()
-                            if jd.get("type") == "audio":
-                                b64 = jd["data"].get("audio")
-                                if b64:
-                                    msg = make_twilio_media_msg_from_mulaw(b64)
-                                    await websocket.send_text(json.dumps(msg))
-                            elif jd.get("type") == "event" and jd["data"].get("event_type") == "final":
-                                break
-            except Exception as e:
-                log.error(f"TTS worker error: {e}")
+            if msg["type"] == "websocket.disconnect":
+                log.warning("⚡ WebSocket disconnected by Exotel")
+                break
 
-        await asyncio.gather(exotel_reader(), stt_sender(), stt_receiver(), tts_worker())
-
+    except Exception as e:
+        log.error(f"💥 WS runtime error: {e}")
+    finally:
+        log.info("🔚 Echo debug WebSocket closed.")
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 # ---------------- API Routes ----------------
 @app.get("/")
 async def root():
