@@ -185,10 +185,10 @@ async def tts_send_text(ws: ClientWebSocketResponse, text: str):
 @app.websocket("/ws")
 async def ws_echo_debug(websocket: WebSocket):
     """
-    Exotel stream echo + diagnostic mode.
-    1. Confirms that Exotel can connect successfully.
-    2. Logs full WS lifecycle events.
-    3. Echoes back the same audio received to verify bidirectional stream.
+    Exotel stream debug mode with initial TTS greeting:
+    - Sends initial sales pitch via Sarvam TTS immediately after accept
+    - Streams TTS μ-law frames to Exotel
+    - Then continues to echo incoming media frames for diagnostic verification
     """
     log.info("🛰️ Incoming WebSocket request from Exotel... waiting to accept...")
     try:
@@ -198,51 +198,135 @@ async def ws_echo_debug(websocket: WebSocket):
         log.error(f"❌ WS accept error: {e}")
         return
 
+    session = None
+    tts_ws = None
     try:
+        # If SARVAM_API_KEY missing, log but continue (echo-only)
+        if SARVAM_API_KEY:
+            session = aiohttp.ClientSession()
+            try:
+                tts_ws = await sarvam_tts_connect(session)
+                await tts_send_config(tts_ws)
+            except Exception as e:
+                log.error(f"❌ Could not connect to Sarvam TTS for greeting: {e}")
+                # close session if opened
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+                session = None
+                tts_ws = None
+
+        # === Send initial greeting TTS (if available) ===
+        if tts_ws:
+            greeting = run_sales_pitch()
+            log.info(f"🗣️ Sending initial greeting via Sarvam TTS: {greeting}")
+            try:
+                await tts_send_text(tts_ws, greeting)
+                # Read TTS frames and forward to Exotel until final event
+                while True:
+                    m = await tts_ws.receive()
+                    if m.type == WSMsgType.TEXT:
+                        jd = m.json()
+                        t = jd.get("type")
+                        if t == "audio":
+                            # Sarvam TTS audio b64 (μ-law) - forward as Twilio-style media
+                            aud_b64 = (jd.get("data") or {}).get("audio")
+                            if aud_b64:
+                                out = make_twilio_media_msg_from_mulaw(aud_b64)
+                                await websocket.send_text(json.dumps(out))
+                        elif t == "event":
+                            if (jd.get("data") or {}).get("event_type") == "final":
+                                log.info("✅ Initial greeting playback finished.")
+                                break
+                        elif t == "error":
+                            log.error(f"TTS error during greeting: {jd}")
+                            break
+                    else:
+                        # ignore non-TEXT frames
+                        continue
+            except Exception as e:
+                log.error(f"Error streaming initial greeting: {e}")
+        else:
+            log.info("ℹ️ Skipping initial TTS greeting (no Sarvam connection).")
+
+        # === After greeting: enter echo/diagnostic loop ===
         while True:
             msg = await websocket.receive()
 
             # Handle binary audio
             if "bytes" in msg and msg["bytes"]:
+                # Some clients might send raw μ-law bytes; echo them back
                 log.info(f"🎧 Received {len(msg['bytes'])} raw bytes (binary)")
-                await websocket.send_bytes(msg["bytes"])  # Echo back to caller
+                try:
+                    await websocket.send_bytes(msg["bytes"])
+                    log.info("🔁 Echoed raw binary bytes back.")
+                except Exception as e:
+                    log.warning(f"Failed to echo binary bytes: {e}")
                 continue
 
-            # Handle text messages (Twilio/Exotel style JSON)
+            # Handle text messages (Exotel JSON)
             if "text" in msg and msg["text"]:
                 try:
                     data = json.loads(msg["text"])
-                    event = data.get("event")
-
-                    if event == "media":
-                        payload = data["media"]["payload"]
-                        # Just echo back same payload
-                        out = {"event": "media", "media": {"payload": payload}}
-                        await websocket.send_text(json.dumps(out))
-                        log.info(f"🔁 Echoed one media frame ({len(payload)} bytes b64)")
-                    elif event == "start":
-                        log.info("🎙️ Exotel Stream started")
-                    elif event == "stop":
-                        log.info("🛑 Exotel Stream stopped")
-                        break
-                    else:
-                        log.info(f"ℹ️ Received event: {event}")
                 except Exception as e:
-                    log.warning(f"JSON parse issue: {e}")
+                    log.warning(f"JSON parse issue from Exotel message: {e}")
                     continue
 
-            if msg["type"] == "websocket.disconnect":
+                event = data.get("event")
+                if event == "media":
+                    media = data.get("media", {})
+                    payload = media.get("payload")
+                    if payload:
+                        # Save a small debug WAV (converted to PCM16) for later inspection
+                        try:
+                            pcm = mulaw_b64_to_linear16(payload)
+                            save_audio_chunk(pcm, prefix="exotel_in")
+                        except Exception as e:
+                            log.debug(f"Could not save audio chunk: {e}")
+
+                        # Echo the same media payload back to Exotel (diagnostic)
+                        out = {"event": "media", "media": {"payload": payload}}
+                        try:
+                            await websocket.send_text(json.dumps(out))
+                            log.info(f"🔁 Echoed one media frame ({len(payload)} bytes b64)")
+                        except Exception as e:
+                            log.warning(f"Failed to echo media frame: {e}")
+                    else:
+                        log.info("⚠️ media event with empty payload")
+                elif event == "start":
+                    log.info("🎙️ Exotel Stream started")
+                elif event == "stop":
+                    log.info("🛑 Exotel Stream stopped by Exotel")
+                    break
+                else:
+                    log.info(f"ℹ️ Received non-media event: {event}")
+
+            if msg.get("type") == "websocket.disconnect":
                 log.warning("⚡ WebSocket disconnected by Exotel")
                 break
 
     except Exception as e:
         log.error(f"💥 WS runtime error: {e}")
     finally:
+        # Cleanup Sarvam TTS session if opened
+        try:
+            if tts_ws:
+                await tts_ws.close()
+        except Exception:
+            pass
+        try:
+            if session:
+                await session.close()
+        except Exception:
+            pass
+
         log.info("🔚 Echo debug WebSocket closed.")
         try:
             await websocket.close()
         except Exception:
             pass
+
 # ---------------- API Routes ----------------
 @app.get("/")
 async def root():
