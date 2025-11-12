@@ -1,22 +1,19 @@
 # ai_agent_v2.py
-# Rupeek AI Voicebot integrated with Exotel Voicebot applet (HTTP POST bidirectional)
-# Uses Sarvam TTS + STT to converse naturally.
+# Rupeek outbound voicebot: Exotel Voicebot <-> Sarvam STT/TTS Bridge
+# Handles start/media/stop events properly to maintain call connection.
 
 import os
 import json
 import base64
 import logging
-import io
-import wave
-import audioop
 import requests
-from datetime import datetime
+from requests.auth import HTTPBasicAuth
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
-# ------------- Setup -------------
+# ------------------- Setup -------------------
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("rupeek-ai")
@@ -27,7 +24,7 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
 )
 
-# ---- ENV ----
+# ------------------- ENV -------------------
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "").strip()
 EXOTEL_SID = os.getenv("EXOTEL_SID", "rupeekfintech13")
 EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY", "")
@@ -36,16 +33,20 @@ EXOPHONE = os.getenv("EXOPHONE", "08069489493")
 EXOTEL_SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com")
 BASE_URL = os.getenv("BASE_URL", "https://ai-calling-bot-rqw5.onrender.com")
 
-IN_SAMPLE_RATE = 8000
-OUT_SAMPLE_RATE = 8000
-
-SARVAM_TTS_URL = "https://api.sarvam.ai/text-to-speech"
-SARVAM_STT_URL = "https://api.sarvam.ai/speech-to-text"
-
-# ---------------- Loan content ----------------
-def run_sales_pitch() -> str:
-    return ("Hi! I’m calling from Rupeek. You have a pre-approved personal loan offer. "
-            "Would you like to check your loan eligibility now?")
+# ------------------- Loan pitch + FAQs -------------------
+loan_steps = [
+    "Open the Rupeek app.",
+    "On the home screen, click the Cash banner.",
+    "Check your pre-approved limit.",
+    "Slide the slider to select the amount and tenure required.",
+    "Tick the consent box to proceed.",
+    "Add your bank account if not visible.",
+    "Update your email ID and address, then proceed to mandate setup.",
+    "Setup autopay for EMI deduction on 5th of each month.",
+    "Once mandate setup is done, you will see the loan summary page.",
+    "Review loan details and click 'Get Money Now'.",
+    "Enter OTP sent to your mobile. Loan disbursal will be initiated within 30 seconds."
+]
 
 FAQ_BANK = [
     (["rate of interest", "interest rate", "roi"],
@@ -58,7 +59,13 @@ FAQ_BANK = [
      "Make sure you're adding a bank account that belongs to you. If it doesn't match your name, it will not be accepted.")
 ]
 
+def run_sales_pitch() -> str:
+    return ("Hi! I’m calling from Rupeek. You have a pre-approved personal loan offer. "
+            "Would you like to check your loan eligibility now?")
+
 def get_bot_reply(user_message: str) -> str:
+    if not user_message:
+        return run_sales_pitch()
     m = user_message.lower()
     if "yes" in m:
         return "Great! Please open the Rupeek app. I will guide you step by step."
@@ -69,110 +76,85 @@ def get_bot_reply(user_message: str) -> str:
             return ans
     return "Sorry, could you please repeat that?"
 
-# ---------------- Helpers ----------------
-def decode_mulaw(b64_data: str) -> bytes:
-    mulaw_bytes = base64.b64decode(b64_data)
-    return audioop.ulaw2lin(mulaw_bytes, 2)
-
-def encode_mulaw(pcm_data: bytes) -> str:
-    mulaw_bytes = audioop.lin2ulaw(pcm_data, 2)
-    return base64.b64encode(mulaw_bytes).decode()
-
-def wav_bytes(pcm_data: bytes, rate: int = 8000) -> bytes:
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(rate)
-        w.writeframes(pcm_data)
-    return buf.getvalue()
-
-# ---------------- Sarvam APIs ----------------
-def text_to_speech(text: str) -> bytes:
-    """Convert text -> PCM16 audio using Sarvam."""
-    payload = {
+# ------------------- Sarvam TTS Helper -------------------
+def generate_tts_audio(text: str) -> str:
+    """Generate μ-law base64 encoded audio for the given text via Sarvam."""
+    tts_url = "https://api.sarvam.ai/text-to-speech"
+    headers = {"api-subscription-key": SARVAM_API_KEY}
+    data = {
         "model": "bulbul:v2",
-        "input": {"text": text},
-        "voice": {"speaker": "anushka", "sample_rate": OUT_SAMPLE_RATE}
+        "input": text,
+        "speaker": "anushka",
+        "output_audio_format": "mulaw",
+        "sample_rate": 8000
     }
-    headers = {"api-subscription-key": SARVAM_API_KEY}
-    log.info(f"🎤 TTS request: {text}")
-    r = requests.post(SARVAM_TTS_URL, json=payload, headers=headers, timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    audio_b64 = data.get("audio")
-    if not audio_b64:
-        raise ValueError("No audio returned from Sarvam TTS")
-    return base64.b64decode(audio_b64)
 
-def speech_to_text(pcm_data: bytes) -> str:
-    """Convert PCM audio -> text via Sarvam STT."""
-    wav_data = wav_bytes(pcm_data)
-    files = {'file': ('audio.wav', wav_data, 'audio/wav')}
-    data = {"model": "saarika:v2.5", "language_code": "en-IN"}
-    headers = {"api-subscription-key": SARVAM_API_KEY}
-    r = requests.post(SARVAM_STT_URL, files=files, data=data, headers=headers, timeout=20)
     try:
-        j = r.json()
-        return j.get("text") or j.get("transcript") or ""
-    except Exception:
+        r = requests.post(tts_url, json=data, headers=headers, timeout=15)
+        if r.status_code != 200:
+            log.error(f"TTS failed: {r.text}")
+            return ""
+        return base64.b64encode(r.content).decode()
+    except Exception as e:
+        log.error(f"TTS generation error: {e}")
         return ""
 
-# ---------------- Voicebot Endpoint ----------------
+# ------------------- Exotel Voicebot Handler -------------------
 @app.post("/exotel/voicebot")
 async def exotel_voicebot(req: Request):
-    """
-    Handles Exotel Voicebot POST events:
-    { event: start | media | stop, media: {payload: <base64>} }
-    """
+    """Main entry for Exotel Voicebot bi-directional flow."""
     try:
         body = await req.json()
     except Exception:
-        return JSONResponse({"error": "invalid_json"}, status_code=400)
+        log.error("Invalid JSON from Exotel")
+        return JSONResponse({"event": "stop"})
 
     event = body.get("event")
     log.info(f"📩 Received Exotel event: {event}")
 
+    # ---- START EVENT ----
     if event == "start":
-        # Send greeting immediately
-        greeting = run_sales_pitch()
-        pcm_data = text_to_speech(greeting)
-        mulaw_b64 = encode_mulaw(pcm_data)
-        log.info("🗣️ Sending greeting audio back to Exotel.")
-        return JSONResponse({
-            "event": "media",
-            "media": {"payload": mulaw_b64}
-        })
+        greeting_text = run_sales_pitch()
+        log.info(f"🗣️ Sending greeting: {greeting_text}")
+        audio_data = generate_tts_audio(greeting_text)
 
+        if not audio_data:
+            log.error("Failed to generate greeting TTS")
+            return JSONResponse({"event": "stop"})
+
+        response = {
+            "event": "media",
+            "media": {"payload": audio_data}
+        }
+
+        log.info("🔁 Sent one TTS audio chunk to Exotel")
+        log.info("✅ Greeting playback complete")
+        return JSONResponse(content=response)
+
+    # ---- MEDIA EVENT ----
     elif event == "media":
-        payload = body.get("media", {}).get("payload")
+        payload = body.get("media", {}).get("payload", "")
         if not payload:
-            return {"status": "no_audio"}
+            return JSONResponse({"event": "continue"})
 
-        pcm_data = decode_mulaw(payload)
-        text = speech_to_text(pcm_data)
-        log.info(f"👂 Heard from user: {text}")
+        log.info("🎧 Received user speech audio (ignored in this version)")
+        # In next version: decode payload -> STT -> generate reply -> TTS -> send media back
 
-        reply = get_bot_reply(text)
-        pcm_reply = text_to_speech(reply)
-        mulaw_reply = encode_mulaw(pcm_reply)
+        return JSONResponse({"event": "continue"})
 
-        return JSONResponse({
-            "event": "media",
-            "media": {"payload": mulaw_reply}
-        })
-
+    # ---- STOP EVENT ----
     elif event == "stop":
-        log.info("🛑 Exotel ended the call.")
-        return {"status": "stopped"}
+        log.info("🛑 Exotel session stopped normally")
+        return JSONResponse({"event": "stop"})
 
-    else:
-        log.warning("⚠️ Unknown event type.")
-        return {"status": "ignored"}
+    # ---- UNKNOWN EVENT ----
+    log.warning(f"⚠️ Unknown event type received: {event}")
+    return JSONResponse({"event": "continue"})
 
-# ---------------- Trigger Call ----------------
+# ------------------- Trigger Call Endpoint -------------------
 @app.post("/trigger_call")
 async def trigger_call(req: Request):
+    """Trigger outbound Exotel call."""
     body = await req.json()
     customer_number = body.get("mobile")
     if not customer_number:
@@ -182,20 +164,25 @@ async def trigger_call(req: Request):
         "From": customer_number,
         "To": EXOPHONE,
         "CallerId": EXOPHONE,
-        "Url": f"{BASE_URL}/exotel/voicebot",
+        "Url": f"https://{BASE_URL.replace('https://','')}/exotel/voicebot",
         "CallType": "trans",
     }
 
     url = f"https://{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/connect"
-    r = requests.post(url, data=payload, auth=(EXOTEL_API_KEY, EXOTEL_API_TOKEN), timeout=20)
-    return {"status": "ok", "response": r.text}
+    try:
+        r = requests.post(url, data=payload, auth=HTTPBasicAuth(EXOTEL_API_KEY, EXOTEL_API_TOKEN), timeout=20)
+        log.info(f"📞 Triggered call via Exotel for {customer_number}")
+        return JSONResponse({"status": "ok", "response": r.text}, status_code=r.status_code)
+    except Exception as e:
+        log.error(f"Call trigger failed: {e}")
+        return JSONResponse({"status": "failed", "error": str(e)}, status_code=500)
 
-# ---------------- Health ----------------
+# ------------------- Health Check -------------------
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "Rupeek AI Voicebot (HTTP Mode)"}
+    return {"status": "ok", "service": "Rupeek AI Voicebot", "version": "v1.0"}
 
-# ---------------- Run ----------------
+# ------------------- Run -------------------
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
