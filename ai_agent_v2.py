@@ -88,17 +88,21 @@ async def sarvam_tts_connect(session: aiohttp.ClientSession) -> ClientWebSocketR
     return await session.ws_connect(SARVAM_TTS_URL, headers={"Api-Subscription-Key": SARVAM_API_KEY})
 
 # ---------- NEW: Exotel Voicebot Handshake ----------
-@app.post("/exotel/voicebot")
+@app.api_route("/exotel/voicebot", methods=["GET", "POST"])
 async def exotel_voicebot_handler(request: Request):
     """
-    Handles initial POST from Exotel Voicebot applet.
+    Handles both GET (for Exotel verification) and POST (for Voicebot handshake).
     Returns the WSS stream URL for bi-directional communication.
     """
+    if request.method == "GET":
+        log.info("🌐 Received Exotel GET verification request")
+        return JSONResponse({"status": "ok", "message": "Exotel Voicebot endpoint reachable"})
+
     try:
         data = await request.json()
-        log.info(f"📩 Received initial Exotel voicebot handshake: {data}")
+        log.info(f"📩 Received initial Exotel Voicebot handshake: {data}")
     except Exception:
-        log.info("📩 Received Exotel handshake (non-JSON payload)")
+        log.info("📩 Received Exotel Voicebot handshake (non-JSON payload)")
 
     wss_url = f"wss://{request.url.hostname}/ws"
     response = {
